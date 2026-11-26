@@ -1,0 +1,182 @@
+pipeline {
+  agent any
+
+  parameters {
+    choice(
+      name: 'ARQUITECTURA',
+      choices: ['desacoplado', 'monolito', 'ambos'],
+      description: 'Selecciona qué arquitectura construir, publicar y desplegar en CD'
+    )
+    string(
+      name: 'DOCKERHUB_USER',
+      defaultValue: 'iudigitaldev',
+      description: 'Usuario o namespace de Docker Hub donde se publican las imágenes'
+    )
+  }
+
+  environment {
+    COMPOSE_CD_FILE = 'docker/docker-compose.cd.yml'
+    IMAGE_TAG       = "${env.BUILD_NUMBER}"
+  }
+
+  stages {
+    stage('1. Checkout') {
+      steps {
+        echo "=== [Fase CD - Paso 1] Obteniendo código fuente en Job: ${env.JOB_NAME} (Build #${env.BUILD_NUMBER}) ==="
+        checkout scm
+      }
+    }
+
+    stage('2. Lint & Test') {
+      steps {
+        echo '=== [Fase CD - Paso 2] Verificando sintaxis Node.js y configuración Docker Compose ==='
+        sh '''
+          set -e
+          node -v
+          node --check backend-monolito/src/index.js
+          node --check backend-monolito/src/seed.js
+          node --check backend-desacoplado/servicio-catalogos/src/index.js
+          node --check backend-desacoplado/servicio-catalogos/src/seed.js
+          node --check backend-desacoplado/servicio-proyectos/src/index.js
+          node --check backend-desacoplado/servicio-proyectos/src/seed.js
+          docker compose -f ${COMPOSE_CD_FILE} config > /dev/null
+          docker compose -f ${COMPOSE_CD_FILE} --profile monolito config > /dev/null
+          echo "Verificación de sintaxis y Compose exitosa."
+        '''
+      }
+    }
+
+    stage('3. Docker Build') {
+      steps {
+        echo "=== [Fase CD - Paso 3] Construyendo imágenes Docker para arquitectura: ${params.ARQUITECTURA} ==="
+        sh '''
+          set -e
+          USER_NS="${DOCKERHUB_USER}"
+          TAG_NUM="${BUILD_NUMBER}"
+
+          if [ "${ARQUITECTURA}" = "monolito" ] || [ "${ARQUITECTURA}" = "ambos" ]; then
+            docker build \
+              -t "${USER_NS}/iudigital-monolito:${TAG_NUM}" \
+              -t "${USER_NS}/iudigital-monolito:latest" \
+              backend-monolito
+          fi
+
+          if [ "${ARQUITECTURA}" = "desacoplado" ] || [ "${ARQUITECTURA}" = "ambos" ]; then
+            docker build \
+              -t "${USER_NS}/iudigital-servicio-catalogos:${TAG_NUM}" \
+              -t "${USER_NS}/iudigital-servicio-catalogos:latest" \
+              backend-desacoplado/servicio-catalogos
+
+            docker build \
+              -t "${USER_NS}/iudigital-servicio-proyectos:${TAG_NUM}" \
+              -t "${USER_NS}/iudigital-servicio-proyectos:latest" \
+              backend-desacoplado/servicio-proyectos
+          fi
+        '''
+      }
+    }
+
+    stage('4. Docker Hub Push') {
+      steps {
+        echo '=== [Fase CD - Paso 4] Autenticando en Docker Hub y publicando imágenes ==='
+        withCredentials([usernamePassword(
+          credentialsId: 'dockerhub-credentials',
+          usernameVariable: 'DOCKER_USER',
+          passwordVariable: 'DOCKER_PASS'
+        )]) {
+          sh '''
+            set -e
+            echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+
+            TARGET_NS="${DOCKERHUB_USER}"
+            TAG_NUM="${BUILD_NUMBER}"
+
+            if [ "${ARQUITECTURA}" = "monolito" ] || [ "${ARQUITECTURA}" = "ambos" ]; then
+              docker push "${TARGET_NS}/iudigital-monolito:${TAG_NUM}"
+              docker push "${TARGET_NS}/iudigital-monolito:latest"
+            fi
+
+            if [ "${ARQUITECTURA}" = "desacoplado" ] || [ "${ARQUITECTURA}" = "ambos" ]; then
+              docker push "${TARGET_NS}/iudigital-servicio-catalogos:${TAG_NUM}"
+              docker push "${TARGET_NS}/iudigital-servicio-catalogos:latest"
+              docker push "${TARGET_NS}/iudigital-servicio-proyectos:${TAG_NUM}"
+              docker push "${TARGET_NS}/iudigital-servicio-proyectos:latest"
+            fi
+
+            docker logout
+          '''
+        }
+      }
+    }
+
+    stage('5. Deploy - CD') {
+      steps {
+        echo '=== [Fase CD - Paso 5] Despliegue Continuo (CD) con Docker Compose ==='
+        sh '''
+          set -e
+          export DOCKERHUB_USER="${DOCKERHUB_USER}"
+          export IMAGE_TAG="latest"
+
+          PROFILE_FLAG=""
+          if [ "${ARQUITECTURA}" = "monolito" ] || [ "${ARQUITECTURA}" = "ambos" ]; then
+            PROFILE_FLAG="--profile monolito"
+          fi
+
+          docker compose ${PROFILE_FLAG} -f ${COMPOSE_CD_FILE} down --remove-orphans || true
+          docker compose ${PROFILE_FLAG} -f ${COMPOSE_CD_FILE} up -d --pull always --force-recreate
+        '''
+      }
+    }
+
+    stage('6. Smoke Test') {
+      steps {
+        echo '=== [Fase CD - Paso 6] Ejecutando Smoke Tests HTTP contra endpoints /health ==='
+        sh '''
+          set -e
+          check_endpoint() {
+            local url="$1"
+            local nombre="$2"
+            local intentos=15
+            local espera=2
+            local i=1
+
+            while [ $i -le $intentos ]; do
+              if curl -sf "$url" > /dev/null; then
+                echo "[OK] ${nombre} respondió correctamente en ${url} (intento ${i}/${intentos})"
+                return 0
+              fi
+              echo "[Espera] ${nombre} aún no responde en ${url} (intento ${i}/${intentos})..."
+              sleep $espera
+              i=$((i + 1))
+            done
+
+            echo "[ERROR] Falló el Smoke Test para ${nombre} en ${url}"
+            return 1
+          }
+
+          if [ "${ARQUITECTURA}" = "desacoplado" ] || [ "${ARQUITECTURA}" = "ambos" ]; then
+            check_endpoint "http://localhost:4001/health" "servicio-catalogos (puerto 4001)"
+            check_endpoint "http://localhost:4002/health" "servicio-proyectos (puerto 4002)"
+          fi
+
+          if [ "${ARQUITECTURA}" = "monolito" ] || [ "${ARQUITECTURA}" = "ambos" ]; then
+            check_endpoint "http://localhost:4000/health" "monolito-app (puerto 4000)"
+          fi
+        '''
+      }
+    }
+  }
+
+  post {
+    always {
+      echo '=== [Post-Acción] Limpiando imágenes Docker huérfanas (dangling) ==='
+      sh 'docker image prune -f || true'
+    }
+    success {
+      echo "Pipeline CD EXITOSO para Job '${env.JOB_NAME}' #${env.BUILD_NUMBER} (Arquitectura: ${params.ARQUITECTURA})."
+    }
+    failure {
+      echo "Pipeline CD FALLIDO en Job '${env.JOB_NAME}' #${env.BUILD_NUMBER}. Revisa los logs de consola."
+    }
+  }
+}

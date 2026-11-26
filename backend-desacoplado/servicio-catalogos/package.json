@@ -1,0 +1,22 @@
+{
+    "name": "iudigital-servicio-catalogos",
+    "version": "1.0.0",
+    "description": "Microservicio de Catálogos Maestros (Tipos de Proyecto, Clientes, Universidades, Etapas) - IUDigital",
+    "main": "src/index.js",
+    "scripts": {
+        "start": "node src/index.js",
+        "dev": "node --watch src/index.js",
+        "seed": "node src/seed.js",
+        "check": "node --check src/index.js && node --check src/seed.js"
+    },
+    "engines": {
+        "node": ">=18.0.0"
+    },
+    "dependencies": {
+        "cors": "^2.8.5",
+        "dotenv": "^16.4.5",
+        "express": "^4.19.2",
+        "mongoose": "^8.3.2",
+        "morgan": "^1.10.0"
+    }
+}

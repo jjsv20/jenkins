@@ -1,0 +1,80 @@
+services:
+  mongo-cd:
+    image: mongo:7.0
+    container_name: iudigital-mongo-cd
+    restart: unless-stopped
+    ports:
+      - "27019:27017"
+    environment:
+      MONGO_INITDB_DATABASE: iudigital_cd
+    volumes:
+      - mongo_cd_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - iudigital-net
+
+  servicio-catalogos:
+    image: ${DOCKERHUB_USER:-iudigitaldev}/iudigital-servicio-catalogos:${IMAGE_TAG:-latest}
+    container_name: iudigital-cd-servicio-catalogos
+    restart: unless-stopped
+    ports:
+      - "4001:4001"
+    environment:
+      NODE_ENV: production
+      PORT: 4001
+      MONGO_URI: mongodb://mongo-cd:27017/iudigital_catalogos_cd
+    depends_on:
+      mongo-cd:
+        condition: service_healthy
+    networks:
+      - iudigital-net
+
+  servicio-proyectos:
+    image: ${DOCKERHUB_USER:-iudigitaldev}/iudigital-servicio-proyectos:${IMAGE_TAG:-latest}
+    container_name: iudigital-cd-servicio-proyectos
+    restart: unless-stopped
+    ports:
+      - "4002:4002"
+    environment:
+      NODE_ENV: production
+      PORT: 4002
+      MONGO_URI: mongodb://mongo-cd:27017/iudigital_proyectos_cd
+      CATALOGOS_SERVICE_URL: http://servicio-catalogos:4001
+      CATALOGOS_TIMEOUT_MS: 3000
+    depends_on:
+      mongo-cd:
+        condition: service_healthy
+      servicio-catalogos:
+        condition: service_started
+    networks:
+      - iudigital-net
+
+  monolito-app:
+    profiles: ["monolito"]
+    image: ${DOCKERHUB_USER:-iudigitaldev}/iudigital-monolito:${IMAGE_TAG:-latest}
+    container_name: iudigital-cd-monolito
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      MONGO_URI: mongodb://mongo-cd:27017/iudigital_monolito_cd
+    depends_on:
+      mongo-cd:
+        condition: service_healthy
+    networks:
+      - iudigital-net
+
+volumes:
+  mongo_cd_data:
+
+networks:
+  iudigital-net:
+    name: iudigital-net
+    driver: bridge
